@@ -1,0 +1,599 @@
+Footsteps:
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local runService = game:GetService("RunService")
+local assets = replicatedStorage.SPH_Assets
+local config = require(assets.GameConfig)
+local bridgeNet = require(replicatedStorage.SPH_Assets.Modules.BridgeNet)
+local soundSets = assets.Sounds.WalkSounds
+local player = game:GetService("Players").LocalPlayer
+
+local repFootstep = bridgeNet.CreateBridge("ReplicateFootstep")
+local defaultSoundSet = soundSets.Concrete
+local leftFoot, rightFoot, stepLeftFoot, humanoidRootPart, humanoid:Humanoid
+local character = nil
+
+local delayTime = 0.5
+local speedRef = 10
+local stepping = false
+
+local materialSounds = {
+	CorrodedMetal = soundSets.Metal,
+	DiamondPlate = soundSets.Metal,
+	Fabric = soundSets.Sand,
+	Glacier = soundSets.Ground,
+	Grass = soundSets.Grass,
+	Ground = soundSets.Ground,
+	LeafyGrass = soundSets.Grass,
+	Metal = soundSets.Metal,
+	Mud = soundSets.Mud,
+	Neon = soundSets.Metal,
+	Pebble = soundSets.Ground,
+	Salt = soundSets.Ground,
+	Sand = soundSets.Sand,
+	Snow = soundSets.Sand,
+	Wood = soundSets.Wood,
+	WoodPlanks = soundSets.Wood
+}
+
+local function GetSound(materialName)
+	local sounds = materialSounds[materialName] or defaultSoundSet
+	sounds = sounds:GetChildren()
+	local randomSound = sounds[math.random(#sounds)]
+	return randomSound.SoundId, randomSound.PlaybackSpeed
+end
+
+local function Footstep(material, foot)
+	local newId, playSpeed = GetSound(material.Name)
+	foot.SoundId = newId
+	foot.PlaybackSpeed = playSpeed + (math.random(-100,100) / 1000)
+	foot:Play()
+end
+
+local function SetupSoundsForCharacter(newCharacter)
+	character = newCharacter
+	
+	humanoid = character:WaitForChild("Humanoid")
+	
+	humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+	local defaultWalk = humanoidRootPart:WaitForChild("Running")
+	if defaultWalk then defaultWalk:Destroy() end
+	
+	local soundOrigin = humanoidRootPart:WaitForChild("FootstepSoundOrigin", 5)
+	
+	leftFoot = soundOrigin:WaitForChild("LeftFoot", 5)
+	rightFoot = soundOrigin:WaitForChild("RightFoot", 5)
+	
+	stepLeftFoot = true
+end
+
+if player.Character then
+	SetupSoundsForCharacter(player.Character)
+end
+player.CharacterAdded:Connect(SetupSoundsForCharacter)
+
+repFootstep:Connect(function(material, foot, volume)
+	if not foot or not foot.Parent then return end
+	foot.Volume = volume
+	Footstep(material, foot)
+end)
+
+if config.footstepSounds then
+	runService.Heartbeat:Connect(function()
+		if humanoid and humanoid.Health > 0 and humanoidRootPart and humanoidRootPart.AssemblyLinearVelocity.Magnitude > humanoid.WalkSpeed / 2 and not stepping and humanoid.FloorMaterial ~= Enum.Material.Air and humanoid.FloorMaterial ~= Enum.Material.Water then
+			stepping = true
+			local curFoot = rightFoot
+			if stepLeftFoot then
+				curFoot = leftFoot
+			end
+			stepLeftFoot = not stepLeftFoot
+			
+			if not curFoot then
+				local soundOrigin = humanoidRootPart:WaitForChild("FootstepSoundOrigin", 5)
+
+				leftFoot = soundOrigin:WaitForChild("LeftFoot", 5)
+				rightFoot = soundOrigin:WaitForChild("RightFoot", 5)
+				curFoot = rightFoot
+			end
+		
+			curFoot.Volume = 0.4 * (humanoidRootPart.AssemblyLinearVelocity.Magnitude / speedRef)
+			
+			Footstep(humanoid.FloorMaterial,curFoot,curFoot.Volume)
+			repFootstep:Fire(humanoid.FloorMaterial,curFoot,curFoot.Volume)
+			
+			task.wait(delayTime * (1 / (humanoidRootPart.AssemblyLinearVelocity.Magnitude / speedRef)))
+			stepping = false
+		end
+	end)
+end
+
+PlayerClient:
+local debugMode = false
+
+local players = game:GetService("Players")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local tweenService = game:GetService("TweenService")
+local runService = game:GetService("RunService")
+local debris = game:GetService("Debris")
+local httpService = game:GetService("HttpService")
+local assets = replicatedStorage.SPH_Assets
+local animations = assets.Animations
+local modules = assets.Modules
+
+local localPlayer = players.LocalPlayer
+
+local config = require(assets.GameConfig)
+local warnPrefix = "[ SPEARHEAD ] "
+print(warnPrefix.."Loading Client "..config.version)
+local hitFX = require(modules.HitFX)
+local shellEjection = require(modules.ShellEjection)
+local bulletHandler = require(modules.BulletHandler)
+
+local bridgeNet = require(replicatedStorage.SPH_Assets.Modules.BridgeNet)
+local bodyAnimCommand = bridgeNet.CreateBridge("BodyAnimCommand")
+local repFire = bridgeNet.CreateBridge("ReplicateFire")
+local repSound = bridgeNet.CreateBridge("ReplicateSound")
+local repHit = bridgeNet.CreateBridge("ReplicateHit")
+local repBolt = bridgeNet.CreateBridge("ReplicateBolt")
+local repToggleAttachment = bridgeNet.CreateBridge("ReplicateToggleAttachment")
+local repMagGrab = bridgeNet.CreateBridge("ReplicateMagGrab")
+local repLean = bridgeNet.CreateBridge("ReplicateLean")
+
+local animLoadStorage = {}
+local lasers = {}
+
+local function AddRig(rig:Model, name:string)
+	local newData = {
+		animator = rig.AnimationController.Animator,
+		LoadedAnimations = {}
+	}
+	animLoadStorage[name] = newData
+end
+
+local function FireBullet(player:Player, firePoint:CFrame, tracer:boolean)
+	local tool = player.Character:FindFirstChildWhichIsA("Tool")
+	if tool and tool:FindFirstChild("SPH_Weapon") then
+		local rig = player.Character.WeaponRig
+		local gunModel = rig.Weapon:FindFirstChildWhichIsA("Model")
+		local wepStats = require(tool.SPH_Weapon.WeaponStats)
+		local muzzle = gunModel.Grip.Muzzle
+		local gunAmmo = tool.Ammo
+		
+		-- Speed of sound
+		local soundDelay
+		if config.speedOfSound then
+			local distance = localPlayer:DistanceFromCharacter(firePoint.Position) / config.meterMultiplier -- Get distance to the sound origin in Meters
+			if distance > 0 then -- 0 is returned if the function fails to work.
+				soundDelay = distance / 343
+			end
+		end 
+		
+		-- Fire effects
+		bulletHandler.FireFX(player, gunModel, "Muzzle", wepStats.muzzleChance, soundDelay)
+
+		-- Fire bullet
+		if gunModel and gunModel.Parent and gunModel:FindFirstChild("Grip") then
+			local muzzle = gunModel.Grip.Muzzle
+			local bulletOrigin = muzzle.WorldCFrame.Position
+			local bulletDirection = muzzle.WorldCFrame.LookVector
+			local bulletVelocity = (bulletDirection * wepStats.muzzleVelocity * config.meterMultiplier) -- 1 Meter = ~3.5 Studs (According to the dev forum)
+
+			local tracerColor = nil
+			if wepStats.tracers and gunAmmo.MagAmmo.Value % wepStats.tracerTiming == 0 then
+				tracerColor = wepStats.tracerColor
+			end
+
+			bulletHandler.FireBullet(rig,bulletOrigin,bulletDirection,bulletVelocity,tool,player,tracerColor,true)
+
+			-- Shell ejection
+			if wepStats.fireMode ~= "Manual" and wepStats.shellEject then
+				shellEjection.ejectShell(player,tool,gunModel)
+			end
+		end
+	end 
+end
+
+-- Update character stuff
+bodyAnimCommand:Connect(function(character:Model, angle)
+	local humanoid = character:FindFirstChild("Humanoid")
+	if not humanoid or humanoid.Health <= 0 or (not character:FindFirstChild("Torso") and not character:FindFirstChild("UpperTorso")) then return end
+	
+	-- Head movement
+	local avatarType = character.Humanoid.RigType
+	local joint
+	if avatarType == Enum.HumanoidRigType.R6 then
+		joint = character.Torso.Neck
+	else
+		joint = character.UpperTorso.Neck
+	end
+	
+	local moveSpeed = config.replicatedHeadRotationSpeed
+
+	tweenService:Create(joint,TweenInfo.new(moveSpeed,Enum.EasingStyle.Quad),{C1 = angle}):Play()
+end)
+
+repLean:Connect(function(character:Model, leanDirection)
+	if not character:FindFirstChild("HumanoidRootPart") then return end
+	
+	-- Update leaning
+	local targetCFrame = CFrame.new(-leanDirection / 2,0,0) * CFrame.Angles(math.rad(90),math.rad(180) + math.rad(17 * leanDirection),0)
+	local baseJoint = character.HumanoidRootPart:FindFirstChild("RootJoint")
+	if baseJoint then
+		tweenService:Create(baseJoint,TweenInfo.new(0.5),{C1 = targetCFrame}):Play()
+	end
+end)
+
+repFire:Connect(FireBullet)
+
+repSound:Connect(function(player:Player, soundToPlay:Sound, dupeSound:boolean)
+	if not soundToPlay then return end
+	
+	if not dupeSound then
+		soundToPlay:Play()
+	else
+		if not player.Character:FindFirstChild("Torso") or not player.Character:FindFirstChild("UpperTorso") then return end
+		local newSound = soundToPlay:Clone()
+		if not soundToPlay.Parent or not soundToPlay.Parent:IsA("BasePart") then
+			newSound.Parent = player.Character.HumanoidRootPart
+		end
+		newSound.Parent = soundToPlay.Parent
+		newSound:Play()
+		--print(newSound.Name)
+		local soundLength = newSound.TimeLength
+		if soundLength < 1 then soundLength = 1 end
+		debris:AddItem(newSound,soundLength)
+	end
+end)
+
+repHit:Connect(function(tool:Tool, raycastResult:RaycastResult)
+	local hitPart = raycastResult.Instance
+	local bulletStats = require(tool.SPH_Weapon.WeaponStats)
+	if raycastResult.Instance and bulletStats.projectile == "Bullet" then
+		hitFX.HitEffect(raycastResult.Position,hitPart,raycastResult.Normal)
+	end
+end)
+
+repBolt:Connect(function(player, direction, magAmmo)
+	local gunModel = player.Character.WeaponRig.Weapon:FindFirstChildWhichIsA("Model")
+	local wepStats = require(player.Character:FindFirstChildWhichIsA("Tool").SPH_Weapon.WeaponStats)
+	local boltData = {
+		fireMoveParts = wepStats.fireMoveParts;
+		fireRate = wepStats.fireRate;
+		emptyLockBolt = wepStats.emptyLockBolt;
+	}
+	bulletHandler.MoveBolt(gunModel,boltData,direction,magAmmo)
+end)
+
+repToggleAttachment:Connect(function(attachment,toggle,character)
+	if attachment.Name == "Flashlight" then
+		attachment:FindFirstChildWhichIsA("Light").Enabled = toggle
+	elseif attachment.Name == "Laser" then
+		if toggle then -- Make new laser object
+			local laserDot = Instance.new("Attachment",workspace.Terrain)
+			laserDot.Name = "ReplicatedLaser"
+			
+			local laserDotUI = assets.HUD.LaserDotUI:Clone()
+			laserDotUI.Enabled = true
+			laserDotUI.Dot.ImageColor3 = attachment.Color.Value
+			laserDotUI.Parent = laserDot
+			
+			-- Add a replicated beam if needed
+			if config.laserTrail then
+				local gunModel = character.WeaponRig.Weapon:FindFirstChildWhichIsA("Model")
+				
+				local laserTrail = Instance.new("Beam")
+				laserTrail.Attachment1 = laserDot
+				laserTrail.LightInfluence = 0
+				laserTrail.Brightness = 3
+				laserTrail.Segments = 1
+				laserTrail.Width0 = 0.02
+				laserTrail.Width1 = 0.02
+				laserTrail.FaceCamera = true
+				laserTrail.Transparency = NumberSequence.new(0.5)
+				laserTrail.Name = "ReplicatedLaserBeam"
+				laserTrail.Parent = laserDot
+				laserTrail.Enabled = true
+				laserTrail.Attachment0 = gunModel.Grip.Laser
+				laserTrail.Color = ColorSequence.new(attachment.Color.Value)
+			end
+			
+			local newLaser = {}
+			newLaser.laserDot = laserDot
+			newLaser.attachment = attachment
+			newLaser.ignoreModel = character
+			table.insert(lasers,newLaser)
+		else
+			for i, laserObject in ipairs(lasers) do
+				if laserObject.attachment == attachment then
+					laserObject.laserDot:Destroy()
+					table.remove(lasers,i)
+					break
+				end
+			end
+		end
+	end
+end)
+
+runService.RenderStepped:Connect(function()
+	for i, laserObject in ipairs(lasers) do
+		local laserPoint = laserObject.attachment
+		if laserPoint and laserPoint.Parent then
+			local laserRayParams = RaycastParams.new()
+			laserRayParams.FilterType = Enum.RaycastFilterType.Exclude
+			laserRayParams.FilterDescendantsInstances = {laserObject.ignoreModel}
+			local laserDotPoint = laserObject.laserDot
+			local rayResult = workspace:Raycast(laserPoint.WorldPosition, laserPoint.WorldCFrame.LookVector * 600, laserRayParams)
+			if rayResult then
+				--laserObject.laserDot.LaserDotUI.Enabled = true
+				laserDotPoint.WorldPosition = rayResult.Position
+			else
+				--laserObject.laserDot.LaserDotUI.Enabled = false
+				laserDotPoint.WorldPosition = laserPoint.WorldPosition + laserPoint.WorldCFrame.LookVector * 600
+			end
+		else
+			laserObject.laserDot:Destroy()
+			table.remove(lasers,i)
+		end
+	end
+end)
+
+repMagGrab:Connect(function(magPart)
+	if magPart then
+		magPart.LocalTransparencyModifier = 0
+		for _, part in ipairs(magPart:GetDescendants()) do
+			if part:IsA("BasePart") then part.LocalTransparencyModifier = 0 end
+		end
+	end
+end)
+
+
+print(warnPrefix.."Main Client loaded successfully!")
+
+ProximityPrompt:
+local prevPrompt
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local proxPromptService = game:GetService("ProximityPromptService")
+
+local config = require(game:GetService("ReplicatedStorage").SPH_Assets.GameConfig)
+
+local player = game:GetService("Players").LocalPlayer
+local char = player.Character or player.CharacterAdded:Wait()
+
+local canView = script.CanView
+
+local PickUpUI = player.PlayerGui:WaitForChild("SPH_UI").PickUpUI
+
+local tweenTime = 0.2
+local delayTime = 0.05
+
+local function ShowPrompt(promptPart, prompt)
+	if canView.Value and char and char.Humanoid.Health > 0 then
+		local newUI = promptPart.PromptUI
+		local input = newUI.Main.Input
+		local pressSquare = newUI.Main.Input.Key.Frame
+
+		-- Enable prompt
+		newUI.Enabled = true
+
+		-- Play opening animation
+		pressSquare.BackgroundTransparency = 0
+		newUI.Main.Size = UDim2.fromScale(0,0)
+		newUI.Main.White.BackgroundTransparency = 0
+		newUI.Main.Input.Frame.Visible = false
+		newUI.Main.Input.Key.Visible = false
+
+		for _, element in ipairs(input:GetChildren()) do
+			if element:IsA("TextLabel") then
+				element.Visible = false
+			end
+		end
+
+
+		TweenService:Create(newUI.Main,TweenInfo.new(tweenTime),{Size = UDim2.fromScale(1,0.05)}):Play()
+
+		task.wait(tweenTime + delayTime)
+		
+		TweenService:Create(newUI.Main,TweenInfo.new(tweenTime),{Size = UDim2.fromScale(1,1)}):Play()
+		TweenService:Create(newUI.Main.White,TweenInfo.new(tweenTime),{BackgroundTransparency = 1}):Play()
+		newUI.Main.Input.Frame.Visible = true
+		newUI.Main.Input.Key.Visible = true
+
+		for _, element in ipairs(input:GetChildren()) do
+			if element:IsA("TextLabel") then
+				element.Visible = true
+			end
+		end
+		
+		task.wait(tweenTime)
+		
+		if prompt:GetAttribute("Shown") and not newUI.Enabled then
+			ShowPrompt(promptPart, prompt)
+		end
+	end
+end
+
+local function HidePrompt(promptPart)
+	local newUI = promptPart.PromptUI
+	local input = newUI.Main.Input
+	local pressSquare = newUI.Main.Input.Key.Frame
+	pressSquare.BackgroundTransparency = 1
+
+	-- Play closing animation
+	TweenService:Create(newUI.Main,TweenInfo.new(tweenTime),{Size = UDim2.fromScale(1,0.05)}):Play()
+	TweenService:Create(newUI.Main.White,TweenInfo.new(tweenTime),{BackgroundTransparency = 0}):Play()
+
+	newUI.Main.Input.Frame.Visible = false
+	newUI.Main.Input.Key.Visible = false
+
+	for _, element in ipairs(input:GetChildren()) do
+		if element:IsA("TextLabel") then
+			element.Visible = false
+		end
+	end
+
+	task.wait(tweenTime + delayTime)
+
+	TweenService:Create(newUI.Main,TweenInfo.new(tweenTime),{Size = UDim2.fromScale(0,0.05)}):Play()
+
+	task.wait(tweenTime)
+
+	-- Disable prompt
+	newUI.Enabled = false
+end
+
+local function SetupPrompt(prompt)
+	local proxPrompt:ProximityPrompt = prompt:FindFirstChildWhichIsA("ProximityPrompt")
+	local config = proxPrompt.SPH_PromptConfig
+	local newUI = script[config.ProxType.Value]:Clone()
+	newUI.Name = "PromptUI"
+	newUI.Parent = prompt
+	newUI.Enabled = false
+	newUI.Main.HoldBar.Visible = proxPrompt.HoldDuration > 0
+	newUI.Main.HoldBar.Bar.Size = UDim2.fromScale(0,1)
+	
+	local input = newUI.Main.Input
+	input.Key.KeyText.Text = UIS:GetStringForKeyCode(proxPrompt.KeyboardKeyCode)
+	
+	if config:FindFirstChild("AmmoType") then
+		input.AmmoType.Text = config.AmmoType.Value
+		if config.InfAmmo.Value then
+			input.AmmoPool.Text = "INF"
+		else
+			input.AmmoPool.Text = config.AmmoPool.Value.." / "..config.AmmoPool.MaxValue
+			config.AmmoPool.Changed:Connect(function()
+				input.AmmoPool.Text = config.AmmoPool.Value.." / "..config.AmmoPool.MaxValue
+			end)
+		end
+	elseif config:FindFirstChild("GunPool") then
+		local gunName = proxPrompt:FindFirstChildWhichIsA("Tool").Name
+		input.GunName.Text = gunName
+		if config.InfGuns.Value then
+			input.Remaining.Text = "INF"
+		elseif config.GunPool.MaxValue > 1 then
+			input.Remaining.Text = config.GunPool.Value.." / "..config.GunPool.MaxValue.." REMAINING"
+			config.GunPool.Changed:Connect(function()
+				input.Remaining.Text = config.GunPool.Value.." / "..config.GunPool.MaxValue.." REMAINING"
+			end)
+		else
+			input.Remaining.Text = ""
+		end
+	end
+		
+	-- Set up key press animations
+	local pressSquare = newUI.Main.Input.Key.Frame
+	local pressAnim = TweenService:Create(pressSquare,TweenInfo.new(0.3),{BackgroundTransparency = 0.7, Size = UDim2.fromScale(1,1)})
+	local releaseAnim = TweenService:Create(pressSquare,TweenInfo.new(0.1),{BackgroundTransparency = 1, Size = UDim2.fromScale(0,0)})
+
+	-- Prompt is a press prompt
+	if proxPrompt.HoldDuration <= 0 then
+		proxPrompt.Triggered:Connect(function()
+			pressSquare.Size = UDim2.fromScale(1,1)
+			pressSquare.BackgroundTransparency = 0.7
+		end)
+		proxPrompt.TriggerEnded:Connect(function()
+			releaseAnim:Play()
+		end)
+
+		-- Prompt is a hold prompt
+	else
+		local bar = newUI.Main.HoldBar.Bar
+		local barAnim = TweenService:Create(bar,TweenInfo.new(proxPrompt.HoldDuration,Enum.EasingStyle.Linear),{Size = UDim2.fromScale(1,1)})
+		local barReset = TweenService:Create(bar,TweenInfo.new(0.1),{Size = UDim2.fromScale(0,1)})
+
+		-- Play anim
+		proxPrompt.PromptButtonHoldBegan:Connect(function()
+			pressAnim:Play()
+
+			barReset:Pause()
+			bar.Size = UDim2.fromScale(0,1)
+			barAnim:Play()
+		end)
+
+		-- Stop anim
+		proxPrompt.PromptButtonHoldEnded:Connect(function()
+			releaseAnim:Play()
+			pressSquare.Size = UDim2.fromScale(0,0)
+
+			barAnim:Pause()
+			barReset:Play()
+		end)
+	end
+end
+
+-- Get new caracter
+player.CharacterAdded:Connect(function(newChar)
+	local humanoid = newChar:WaitForChild("Humanoid")
+	char = newChar
+	PickUpUI = player.PlayerGui:WaitForChild("SPH_UI").PickUpUI
+	
+	proxPromptService.Enabled = true
+	
+	humanoid.Died:Connect(function()
+		proxPromptService.Enabled = false
+	end)
+end)
+
+proxPromptService.PromptShown:Connect(function(prompt)
+	prompt:SetAttribute("Shown", true)
+	if prompt:FindFirstChild("SPH_PromptConfig") then
+		if not prompt.Parent:FindFirstChild("PromptUI") then
+			SetupPrompt(prompt.Parent)
+		end
+		ShowPrompt(prompt.Parent, prompt)
+	elseif PickUpUI:FindFirstChild("ItemName") and prompt.Parent.Parent:FindFirstChild("PickupHighlight") then
+		prompt.Parent.Parent.PickupHighlight.Enabled = true
+		PickUpUI.Visible = true
+		PickUpUI.ItemName.Text = "["..string.upper(config.pickupKey[1].Name).."] ".. prompt.Parent.Parent.Name
+		
+		local tool = prompt.Parent.Parent:FindFirstChildWhichIsA("Tool")
+		if tool and tool:FindFirstChild("SPH_Weapon") then
+			local wepStats = require(tool.SPH_Weapon.WeaponStats)
+			PickUpUI.ItemName.Text = PickUpUI.ItemName.Text.. " ".. wepStats.ammoType
+		end
+	end
+end)
+
+proxPromptService.PromptHidden:Connect(function(prompt)
+	prompt:SetAttribute("Shown", false)
+	if prompt:FindFirstChild("SPH_PromptConfig") then
+		if not prompt.Parent:FindFirstChild("PromptUI") then
+			SetupPrompt(prompt.Parent)
+		end
+		HidePrompt(prompt.Parent)
+	elseif prompt.Parent and prompt.Parent.Parent:FindFirstChild("PickupHighlight") then
+		prompt.Parent.Parent.PickupHighlight.Enabled = false
+		PickUpUI.Visible = false
+	else
+		PickUpUI.Visible = false
+	end
+end)
+
+SystemChat:
+local playerServer = game:GetService("Players")
+local starterGui = game:GetService("StarterGui")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+
+local bridgeNet = require(replicatedStorage.SPH_Assets.Modules.BridgeNet)
+local sysMessage = bridgeNet.CreateBridge("SystemMessage")
+
+local textChatService = game:GetService("TextChatService")
+local legacyChat = textChatService.ChatVersion == Enum.ChatVersion.LegacyChatService
+
+local config = require(replicatedStorage.SPH_Assets.GameConfig)
+
+task.wait(2)
+
+if config.systemChat then
+	if legacyChat then
+		sysMessage:Connect(function(message,color)
+			if legacyChat then
+				starterGui:SetCore("ChatMakeSystemMessage",{
+					Text = message,
+					Color = color,
+				})
+			else
+				
+			end
+		end)
+	end
+end
